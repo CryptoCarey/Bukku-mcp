@@ -5,10 +5,9 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -41,50 +40,35 @@ def get_invoices(
         "status": status, "contact_name": contact_name, "per_page": per_page
     })
 
-
 @mcp.tool()
 def get_invoice(invoice_id: int) -> dict:
     """Get full details of a single invoice by ID."""
     return bukku_get(f"/sales/invoices/{invoice_id}")
-
 
 @mcp.tool()
 def get_overdue_invoices(per_page: int = 50) -> dict:
     """Get all overdue invoices (unpaid past due date)."""
     return bukku_get("/sales/invoices", {"status": "overdue", "per_page": per_page})
 
-
 @mcp.tool()
-def get_payments(
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    per_page: int = 20
-) -> dict:
+def get_payments(date_from: Optional[str] = None, date_to: Optional[str] = None, per_page: int = 20) -> dict:
     """List received payments filtered by date range (YYYY-MM-DD)."""
     return bukku_get("/sales/receipts", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
-
 
 @mcp.tool()
 def get_contacts(name: Optional[str] = None, per_page: int = 30) -> dict:
     """List contacts (customers/suppliers), optionally filtered by name."""
     return bukku_get("/contacts", {"name": name, "per_page": per_page})
 
-
 @mcp.tool()
-def get_journal_entries(
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    per_page: int = 20
-) -> dict:
+def get_journal_entries(date_from: Optional[str] = None, date_to: Optional[str] = None, per_page: int = 20) -> dict:
     """List journal entries for P&L analysis, filtered by date range (YYYY-MM-DD)."""
     return bukku_get("/journal_entries", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
-
 
 @mcp.tool()
 def get_accounts(account_type: Optional[str] = None) -> dict:
     """List chart of accounts, optionally filtered by type (revenue, expense, asset)."""
     return bukku_get("/accounts", {"type": account_type})
-
 
 @mcp.tool()
 def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
@@ -106,10 +90,7 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
 # --- OAuth endpoints ---
 
 async def oauth_protected_resource(request: Request):
-    return JSONResponse({
-        "resource": SERVER_URL,
-        "authorization_servers": [SERVER_URL]
-    })
+    return JSONResponse({"resource": SERVER_URL, "authorization_servers": [SERVER_URL]})
 
 async def oauth_authorization_server(request: Request):
     return JSONResponse({
@@ -142,19 +123,10 @@ async def oauth_authorize(request: Request):
     return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}")
 
 async def oauth_token(request: Request):
-    return JSONResponse({
-        "access_token": "bukku-mcp-token",
-        "token_type": "bearer",
-        "expires_in": 86400
-    })
+    return JSONResponse({"access_token": "bukku-mcp-token", "token_type": "bearer", "expires_in": 86400})
 
 
-# Strip Bearer token before passing to MCP (it doesn't need auth internally)
-class StripAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        return await call_next(request)
-
-
+# Build the combined app - OAuth routes first, then MCP at root
 mcp_app = mcp.streamable_http_app()
 
 app = Starlette(routes=[
@@ -164,7 +136,7 @@ app = Starlette(routes=[
     Route("/register", oauth_register, methods=["POST"]),
     Route("/oauth/authorize", oauth_authorize),
     Route("/oauth/token", oauth_token, methods=["POST"]),
-    Mount("/mcp", app=mcp_app),
+    Mount("/", app=mcp_app),
 ])
 
 if __name__ == "__main__":
