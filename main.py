@@ -2,8 +2,6 @@ import os
 import httpx
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.routing import Mount
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -11,7 +9,7 @@ BUKKU_SUBDOMAIN = os.environ["BUKKU_SUBDOMAIN"]
 BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 
-mcp = FastMCP("Bukku")
+mcp = FastMCP("Bukku", stateless_http=True)
 
 
 def get(path: str, params: dict = {}) -> dict:
@@ -128,20 +126,17 @@ def get_sales_summary(
 ) -> dict:
     """
     Get a sales summary: total invoiced, total paid, total outstanding.
-    Calculates from invoice data for a given date range.
     """
     data = get("/sales/invoices", {
         "date_from": date_from,
         "date_to": date_to,
         "per_page": 100
     })
-
     invoices = data.get("data", [])
     total_invoiced = sum(float(inv.get("total", 0)) for inv in invoices)
     total_paid = sum(float(inv.get("total", 0)) for inv in invoices if inv.get("status") == "paid")
     total_outstanding = sum(float(inv.get("balance_due", 0)) for inv in invoices)
     overdue = [inv for inv in invoices if inv.get("status") == "overdue"]
-
     return {
         "period": {"from": date_from, "to": date_to},
         "total_invoiced": round(total_invoiced, 2),
@@ -153,13 +148,8 @@ def get_sales_summary(
     }
 
 
-# Mount at /mcp path for Claude connector
-mcp_app = mcp.streamable_http_app()
-app = Starlette(routes=[
-    Mount("/mcp", app=mcp_app),
-])
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
+    app = mcp.streamable_http_app()
     uvicorn.run(app, host="0.0.0.0", port=port)
