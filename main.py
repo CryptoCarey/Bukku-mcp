@@ -2,6 +2,10 @@ import os
 import httpx
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Mount, Route
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -9,7 +13,6 @@ BUKKU_SUBDOMAIN = os.environ["BUKKU_SUBDOMAIN"]
 BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 
-# stateless_http=True serves at root path, no OAuth required
 mcp = FastMCP("Bukku", stateless_http=True)
 
 
@@ -28,12 +31,7 @@ def get_invoices(
     contact_name: Optional[str] = None,
     per_page: int = 20
 ) -> dict:
-    """
-    List sales invoices from Bukku.
-    - date_from / date_to: filter by date range (YYYY-MM-DD)
-    - status: e.g. 'unpaid', 'paid', 'overdue', 'draft'
-    - contact_name: filter by customer name
-    """
+    """List sales invoices. Status: unpaid, paid, overdue, draft. Date format: YYYY-MM-DD."""
     return get("/sales/invoices", {
         "date_from": date_from, "date_to": date_to,
         "status": status, "contact_name": contact_name, "per_page": per_page
@@ -74,7 +72,7 @@ def get_journal_entries(
     date_to: Optional[str] = None,
     per_page: int = 20
 ) -> dict:
-    """List journal entries for P&L analysis, filtered by date range."""
+    """List journal entries for P&L analysis, filtered by date range (YYYY-MM-DD)."""
     return get("/journal_entries", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
 
 
@@ -101,9 +99,27 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     }
 
 
+# OAuth discovery endpoints — return 401 to signal no auth required
+async def oauth_protected_resource(request: Request):
+    return JSONResponse({"error": "no_auth_required"}, status_code=200)
+
+async def oauth_authorization_server(request: Request):
+    return JSONResponse({"error": "no_auth_required"}, status_code=200)
+
+async def oauth_register(request: Request):
+    return JSONResponse({"error": "no_auth_required"}, status_code=200)
+
+
+mcp_app = mcp.streamable_http_app()
+
+app = Starlette(routes=[
+    Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+    Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
+    Route("/register", oauth_register, methods=["POST"]),
+    Mount("/", app=mcp_app),
+])
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    # Get the app - stateless_http=True makes it serve at / root
-    app = mcp.streamable_http_app()
     uvicorn.run(app, host="0.0.0.0", port=port)
