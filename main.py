@@ -5,9 +5,8 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -15,6 +14,7 @@ BUKKU_SUBDOMAIN = os.environ["BUKKU_SUBDOMAIN"]
 BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
+MCP_URL = f"{SERVER_URL}/mcp"
 
 mcp = FastMCP("Bukku", stateless_http=True)
 
@@ -88,9 +88,13 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
 
 
 # --- OAuth endpoints ---
+# resource points to /mcp so Claude knows where to POST after auth
 
 async def oauth_protected_resource(request: Request):
-    return JSONResponse({"resource": SERVER_URL, "authorization_servers": [SERVER_URL]})
+    return JSONResponse({
+        "resource": MCP_URL,
+        "authorization_servers": [SERVER_URL]
+    })
 
 async def oauth_authorization_server(request: Request):
     return JSONResponse({
@@ -126,7 +130,6 @@ async def oauth_token(request: Request):
     return JSONResponse({"access_token": "bukku-mcp-token", "token_type": "bearer", "expires_in": 86400})
 
 
-# Build the combined app - OAuth routes first, then MCP at root
 mcp_app = mcp.streamable_http_app()
 
 app = Starlette(routes=[
@@ -136,7 +139,7 @@ app = Starlette(routes=[
     Route("/register", oauth_register, methods=["POST"]),
     Route("/oauth/authorize", oauth_authorize),
     Route("/oauth/token", oauth_token, methods=["POST"]),
-    Mount("/", app=mcp_app),
+    Mount("/", app=mcp_app),  # FastMCP handles /mcp internally
 ])
 
 if __name__ == "__main__":
