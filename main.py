@@ -6,7 +6,8 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -14,7 +15,6 @@ BUKKU_SUBDOMAIN = os.environ["BUKKU_SUBDOMAIN"]
 BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
-MCP_URL = f"{SERVER_URL}/mcp"
 
 mcp = FastMCP("Bukku", stateless_http=True)
 
@@ -27,18 +27,11 @@ def bukku_get(path: str, params: dict = {}) -> dict:
 
 
 @mcp.tool()
-def get_invoices(
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    status: Optional[str] = None,
-    contact_name: Optional[str] = None,
-    per_page: int = 20
-) -> dict:
+def get_invoices(date_from: Optional[str] = None, date_to: Optional[str] = None,
+                 status: Optional[str] = None, contact_name: Optional[str] = None, per_page: int = 20) -> dict:
     """List sales invoices. Status: unpaid, paid, overdue, draft. Date format: YYYY-MM-DD."""
-    return bukku_get("/sales/invoices", {
-        "date_from": date_from, "date_to": date_to,
-        "status": status, "contact_name": contact_name, "per_page": per_page
-    })
+    return bukku_get("/sales/invoices", {"date_from": date_from, "date_to": date_to,
+                                         "status": status, "contact_name": contact_name, "per_page": per_page})
 
 @mcp.tool()
 def get_invoice(invoice_id: int) -> dict:
@@ -87,14 +80,31 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     }
 
 
+# --- Path rewriting middleware ---
+# FastMCP serves at /mcp — rewrite / and /* to /mcp so Claude's POST / hits the right handler
+
+class RewriteToMCP:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "http":
+            path = scope.get("path", "/")
+            # Only rewrite if not an OAuth or well-known path
+            if not any(path.startswith(p) for p in [
+                "/.well-known", "/oauth", "/register"
+            ]):
+                # Rewrite to /mcp
+                scope = dict(scope)
+                scope["path"] = "/mcp"
+                scope["raw_path"] = b"/mcp"
+        await self.app(scope, receive, send)
+
+
 # --- OAuth endpoints ---
-# resource points to /mcp so Claude knows where to POST after auth
 
 async def oauth_protected_resource(request: Request):
-    return JSONResponse({
-        "resource": MCP_URL,
-        "authorization_servers": [SERVER_URL]
-    })
+    return JSONResponse({"resource": SERVER_URL, "authorization_servers": [SERVER_URL]})
 
 async def oauth_authorization_server(request: Request):
     return JSONResponse({
@@ -130,7 +140,9 @@ async def oauth_token(request: Request):
     return JSONResponse({"access_token": "bukku-mcp-token", "token_type": "bearer", "expires_in": 86400})
 
 
-mcp_app = mcp.streamable_http_app()
+# Build app: OAuth routes handled by Starlette, everything else rewritten to /mcp
+_mcp_inner = mcp.streamable_http_app()
+_mcp_with_rewrite = RewriteToMCP(_mcp_inner)
 
 app = Starlette(routes=[
     Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
@@ -139,10 +151,41 @@ app = Starlette(routes=[
     Route("/register", oauth_register, methods=["POST"]),
     Route("/oauth/authorize", oauth_authorize),
     Route("/oauth/token", oauth_token, methods=["POST"]),
-    Mount("/", app=mcp_app),  # FastMCP handles /mcp internally
 ])
+
+# Wrap entire app with path rewriter, but let Starlette handle OAuth routes first
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class MCPFallback:
+    """If Starlette returns 404, try the MCP app with path rewritten to /mcp."""
+    def __init__(self, starlette_app: ASGIApp, mcp_app: ASGIApp):
+        self.starlette = starlette_app
+        self.mcp = mcp_app
+        self._404_responses = set()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.starlette(scope, receive, send)
+            return
+
+        path = scope.get("path", "/")
+
+        # OAuth/well-known paths go to Starlette
+        if any(path.startswith(p) for p in ["/.well-known", "/oauth", "/register"]):
+            await self.starlette(scope, receive, send)
+            return
+
+        # Everything else goes to MCP with path rewritten to /mcp
+        mcp_scope = dict(scope)
+        mcp_scope["path"] = "/mcp"
+        mcp_scope["raw_path"] = b"/mcp"
+        await self.mcp(mcp_scope, receive, send)
+
+
+final_app = MCPFallback(app, _mcp_inner)
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(final_app, host="0.0.0.0", port=port)
+
