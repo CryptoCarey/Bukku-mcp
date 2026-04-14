@@ -5,8 +5,10 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -18,7 +20,7 @@ SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railw
 mcp = FastMCP("Bukku", stateless_http=True)
 
 
-def get(path: str, params: dict = {}) -> dict:
+def bukku_get(path: str, params: dict = {}) -> dict:
     url = f"{BASE_URL}{path}"
     r = httpx.get(url, headers=HEADERS, params={k: v for k, v in params.items() if v is not None}, timeout=15)
     r.raise_for_status()
@@ -34,7 +36,7 @@ def get_invoices(
     per_page: int = 20
 ) -> dict:
     """List sales invoices. Status: unpaid, paid, overdue, draft. Date format: YYYY-MM-DD."""
-    return get("/sales/invoices", {
+    return bukku_get("/sales/invoices", {
         "date_from": date_from, "date_to": date_to,
         "status": status, "contact_name": contact_name, "per_page": per_page
     })
@@ -43,13 +45,13 @@ def get_invoices(
 @mcp.tool()
 def get_invoice(invoice_id: int) -> dict:
     """Get full details of a single invoice by ID."""
-    return get(f"/sales/invoices/{invoice_id}")
+    return bukku_get(f"/sales/invoices/{invoice_id}")
 
 
 @mcp.tool()
 def get_overdue_invoices(per_page: int = 50) -> dict:
     """Get all overdue invoices (unpaid past due date)."""
-    return get("/sales/invoices", {"status": "overdue", "per_page": per_page})
+    return bukku_get("/sales/invoices", {"status": "overdue", "per_page": per_page})
 
 
 @mcp.tool()
@@ -59,13 +61,13 @@ def get_payments(
     per_page: int = 20
 ) -> dict:
     """List received payments filtered by date range (YYYY-MM-DD)."""
-    return get("/sales/receipts", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
+    return bukku_get("/sales/receipts", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
 
 
 @mcp.tool()
 def get_contacts(name: Optional[str] = None, per_page: int = 30) -> dict:
     """List contacts (customers/suppliers), optionally filtered by name."""
-    return get("/contacts", {"name": name, "per_page": per_page})
+    return bukku_get("/contacts", {"name": name, "per_page": per_page})
 
 
 @mcp.tool()
@@ -75,19 +77,19 @@ def get_journal_entries(
     per_page: int = 20
 ) -> dict:
     """List journal entries for P&L analysis, filtered by date range (YYYY-MM-DD)."""
-    return get("/journal_entries", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
+    return bukku_get("/journal_entries", {"date_from": date_from, "date_to": date_to, "per_page": per_page})
 
 
 @mcp.tool()
 def get_accounts(account_type: Optional[str] = None) -> dict:
     """List chart of accounts, optionally filtered by type (revenue, expense, asset)."""
-    return get("/accounts", {"type": account_type})
+    return bukku_get("/accounts", {"type": account_type})
 
 
 @mcp.tool()
 def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = None) -> dict:
     """Get sales summary: total invoiced, paid, outstanding, and overdue amounts."""
-    data = get("/sales/invoices", {"date_from": date_from, "date_to": date_to, "per_page": 100})
+    data = bukku_get("/sales/invoices", {"date_from": date_from, "date_to": date_to, "per_page": 100})
     invoices = data.get("data", [])
     overdue = [i for i in invoices if i.get("status") == "overdue"]
     return {
@@ -101,18 +103,15 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     }
 
 
-# --- OAuth endpoints (minimal, auto-approving) ---
+# --- OAuth endpoints ---
 
 async def oauth_protected_resource(request: Request):
-    """Tell Claude this server uses OAuth."""
     return JSONResponse({
         "resource": SERVER_URL,
         "authorization_servers": [SERVER_URL]
     })
 
-
 async def oauth_authorization_server(request: Request):
-    """OAuth server metadata."""
     return JSONResponse({
         "issuer": SERVER_URL,
         "authorization_endpoint": f"{SERVER_URL}/oauth/authorize",
@@ -123,13 +122,10 @@ async def oauth_authorization_server(request: Request):
         "code_challenge_methods_supported": ["S256"]
     })
 
-
 async def oauth_register(request: Request):
-    """Dynamic client registration — auto-approve any client."""
     body = await request.json()
-    client_id = secrets.token_urlsafe(16)
     return JSONResponse({
-        "client_id": client_id,
+        "client_id": secrets.token_urlsafe(16),
         "client_secret": "not-needed",
         "redirect_uris": body.get("redirect_uris", []),
         "grant_types": ["authorization_code"],
@@ -137,24 +133,26 @@ async def oauth_register(request: Request):
         "token_endpoint_auth_method": "none"
     }, status_code=201)
 
-
 async def oauth_authorize(request: Request):
-    """Auto-approve authorization — redirect straight back with code."""
     params = dict(request.query_params)
     redirect_uri = params.get("redirect_uri", "")
     state = params.get("state", "")
     code = secrets.token_urlsafe(16)
-    separator = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(f"{redirect_uri}{separator}code={code}&state={state}")
-
+    sep = "&" if "?" in redirect_uri else "?"
+    return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}")
 
 async def oauth_token(request: Request):
-    """Issue a token — just return a static one since we don't need real auth."""
     return JSONResponse({
         "access_token": "bukku-mcp-token",
         "token_type": "bearer",
         "expires_in": 86400
     })
+
+
+# Strip Bearer token before passing to MCP (it doesn't need auth internally)
+class StripAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        return await call_next(request)
 
 
 mcp_app = mcp.streamable_http_app()
@@ -166,7 +164,7 @@ app = Starlette(routes=[
     Route("/register", oauth_register, methods=["POST"]),
     Route("/oauth/authorize", oauth_authorize),
     Route("/oauth/token", oauth_token, methods=["POST"]),
-    Mount("/", app=mcp_app),
+    Mount("/mcp", app=mcp_app),
 ])
 
 if __name__ == "__main__":
