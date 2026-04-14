@@ -1,10 +1,11 @@
 import os
 import httpx
+import secrets
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.routing import Mount, Route
 
 # --- Config ---
@@ -12,6 +13,7 @@ BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
 BUKKU_SUBDOMAIN = os.environ["BUKKU_SUBDOMAIN"]
 BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
+SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
 
 mcp = FastMCP("Bukku", stateless_http=True)
 
@@ -99,15 +101,60 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     }
 
 
-# OAuth discovery endpoints — return 401 to signal no auth required
+# --- OAuth endpoints (minimal, auto-approving) ---
+
 async def oauth_protected_resource(request: Request):
-    return JSONResponse({"error": "no_auth_required"}, status_code=200)
+    """Tell Claude this server uses OAuth."""
+    return JSONResponse({
+        "resource": SERVER_URL,
+        "authorization_servers": [SERVER_URL]
+    })
+
 
 async def oauth_authorization_server(request: Request):
-    return JSONResponse({"error": "no_auth_required"}, status_code=200)
+    """OAuth server metadata."""
+    return JSONResponse({
+        "issuer": SERVER_URL,
+        "authorization_endpoint": f"{SERVER_URL}/oauth/authorize",
+        "token_endpoint": f"{SERVER_URL}/oauth/token",
+        "registration_endpoint": f"{SERVER_URL}/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"]
+    })
+
 
 async def oauth_register(request: Request):
-    return JSONResponse({"error": "no_auth_required"}, status_code=200)
+    """Dynamic client registration — auto-approve any client."""
+    body = await request.json()
+    client_id = secrets.token_urlsafe(16)
+    return JSONResponse({
+        "client_id": client_id,
+        "client_secret": "not-needed",
+        "redirect_uris": body.get("redirect_uris", []),
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none"
+    }, status_code=201)
+
+
+async def oauth_authorize(request: Request):
+    """Auto-approve authorization — redirect straight back with code."""
+    params = dict(request.query_params)
+    redirect_uri = params.get("redirect_uri", "")
+    state = params.get("state", "")
+    code = secrets.token_urlsafe(16)
+    separator = "&" if "?" in redirect_uri else "?"
+    return RedirectResponse(f"{redirect_uri}{separator}code={code}&state={state}")
+
+
+async def oauth_token(request: Request):
+    """Issue a token — just return a static one since we don't need real auth."""
+    return JSONResponse({
+        "access_token": "bukku-mcp-token",
+        "token_type": "bearer",
+        "expires_in": 86400
+    })
 
 
 mcp_app = mcp.streamable_http_app()
@@ -115,7 +162,10 @@ mcp_app = mcp.streamable_http_app()
 app = Starlette(routes=[
     Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
     Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
+    Route("/oauth/register", oauth_register, methods=["POST"]),
     Route("/register", oauth_register, methods=["POST"]),
+    Route("/oauth/authorize", oauth_authorize),
+    Route("/oauth/token", oauth_token, methods=["POST"]),
     Mount("/", app=mcp_app),
 ])
 
