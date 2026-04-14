@@ -1,8 +1,9 @@
 import os
 import httpx
-from datetime import date
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.routing import Mount
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -19,8 +20,6 @@ def get(path: str, params: dict = {}) -> dict:
     r.raise_for_status()
     return r.json()
 
-
-# --- Tools ---
 
 @mcp.tool()
 def get_invoices(
@@ -154,8 +153,13 @@ def get_sales_summary(
     }
 
 
+# Mount at /mcp path for Claude connector
+mcp_app = mcp.streamable_http_app()
+app = Starlette(routes=[
+    Mount("/mcp", app=mcp_app),
+])
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    app = mcp.streamable_http_app()
     uvicorn.run(app, host="0.0.0.0", port=port)
