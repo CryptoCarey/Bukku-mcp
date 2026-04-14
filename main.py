@@ -1,13 +1,13 @@
 import os
 import httpx
 import secrets
+from contextlib import asynccontextmanager
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Route
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.routing import Mount, Route
 
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
@@ -80,27 +80,6 @@ def get_sales_summary(date_from: Optional[str] = None, date_to: Optional[str] = 
     }
 
 
-# --- Path rewriting middleware ---
-# FastMCP serves at /mcp — rewrite / and /* to /mcp so Claude's POST / hits the right handler
-
-class RewriteToMCP:
-    def __init__(self, app: ASGIApp):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] == "http":
-            path = scope.get("path", "/")
-            # Only rewrite if not an OAuth or well-known path
-            if not any(path.startswith(p) for p in [
-                "/.well-known", "/oauth", "/register"
-            ]):
-                # Rewrite to /mcp
-                scope = dict(scope)
-                scope["path"] = "/mcp"
-                scope["raw_path"] = b"/mcp"
-        await self.app(scope, receive, send)
-
-
 # --- OAuth endpoints ---
 
 async def oauth_protected_resource(request: Request):
@@ -140,52 +119,31 @@ async def oauth_token(request: Request):
     return JSONResponse({"access_token": "bukku-mcp-token", "token_type": "bearer", "expires_in": 86400})
 
 
-# Build app: OAuth routes handled by Starlette, everything else rewritten to /mcp
-_mcp_inner = mcp.streamable_http_app()
-_mcp_with_rewrite = RewriteToMCP(_mcp_inner)
+# --- Build app with MCP lifespan properly initialized ---
 
-app = Starlette(routes=[
-    Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
-    Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
-    Route("/oauth/register", oauth_register, methods=["POST"]),
-    Route("/register", oauth_register, methods=["POST"]),
-    Route("/oauth/authorize", oauth_authorize),
-    Route("/oauth/token", oauth_token, methods=["POST"]),
-])
+# Get the inner MCP Starlette app (has lifespan + /mcp route)
+mcp_starlette = mcp.streamable_http_app()
 
-# Wrap entire app with path rewriter, but let Starlette handle OAuth routes first
-from starlette.middleware.base import BaseHTTPMiddleware
+# Wrap lifespan: start MCP session manager + our app
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    async with mcp_starlette.router.lifespan_context(mcp_starlette):
+        yield
 
-class MCPFallback:
-    """If Starlette returns 404, try the MCP app with path rewritten to /mcp."""
-    def __init__(self, starlette_app: ASGIApp, mcp_app: ASGIApp):
-        self.starlette = starlette_app
-        self.mcp = mcp_app
-        self._404_responses = set()
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] != "http":
-            await self.starlette(scope, receive, send)
-            return
-
-        path = scope.get("path", "/")
-
-        # OAuth/well-known paths go to Starlette
-        if any(path.startswith(p) for p in ["/.well-known", "/oauth", "/register"]):
-            await self.starlette(scope, receive, send)
-            return
-
-        # Everything else goes to MCP with path rewritten to /mcp
-        mcp_scope = dict(scope)
-        mcp_scope["path"] = "/mcp"
-        mcp_scope["raw_path"] = b"/mcp"
-        await self.mcp(mcp_scope, receive, send)
-
-
-final_app = MCPFallback(app, _mcp_inner)
+app = Starlette(
+    lifespan=lifespan,
+    routes=[
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+        Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
+        Route("/oauth/register", oauth_register, methods=["POST"]),
+        Route("/register", oauth_register, methods=["POST"]),
+        Route("/oauth/authorize", oauth_authorize),
+        Route("/oauth/token", oauth_token, methods=["POST"]),
+        Mount("/", app=mcp_starlette),  # includes /mcp route with session manager
+    ]
+)
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(final_app, host="0.0.0.0", port=port)
-
+    uvicorn.run(app, host="0.0.0.0", port=port)
