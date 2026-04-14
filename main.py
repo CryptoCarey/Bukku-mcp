@@ -16,7 +16,9 @@ BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
 
+# Serve MCP at root path so Claude's POST / hits it directly
 mcp = FastMCP("Bukku", stateless_http=True)
+mcp.settings.streamable_http_path = "/"
 
 
 def bukku_get(path: str, params: dict = {}) -> dict:
@@ -119,12 +121,9 @@ async def oauth_token(request: Request):
     return JSONResponse({"access_token": "bukku-mcp-token", "token_type": "bearer", "expires_in": 86400})
 
 
-# --- Build app with MCP lifespan properly initialized ---
-
-# Get the inner MCP Starlette app (has lifespan + /mcp route)
+# Build MCP app with route at /
 mcp_starlette = mcp.streamable_http_app()
 
-# Wrap lifespan: start MCP session manager + our app
 @asynccontextmanager
 async def lifespan(app: Starlette):
     async with mcp_starlette.router.lifespan_context(mcp_starlette):
@@ -139,7 +138,7 @@ app = Starlette(
         Route("/register", oauth_register, methods=["POST"]),
         Route("/oauth/authorize", oauth_authorize),
         Route("/oauth/token", oauth_token, methods=["POST"]),
-        Mount("/", app=mcp_starlette),  # includes /mcp route with session manager
+        Mount("/", app=mcp_starlette),
     ]
 )
 
