@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
@@ -141,6 +142,8 @@ app = Starlette(
         Mount("/", app=mcp_starlette),
     ]
 )
+
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 
 if __name__ == "__main__":
     import uvicorn
