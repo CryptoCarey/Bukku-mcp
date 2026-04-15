@@ -13,8 +13,11 @@ from starlette.routing import Mount, Route
 # --- Config ---
 BUKKU_TOKEN = os.environ["BUKKU_TOKEN"]
 BUKKU_SUBDOMAIN = os.environ["BUKKU_SUBDOMAIN"]
-BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
-HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
+BASE_URL = "https://api.bukku.my"
+HEADERS = {
+    "Authorization": f"Bearer {BUKKU_TOKEN}",
+    "Company-Subdomain": BUKKU_SUBDOMAIN
+}
 SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
 
 # Disable DNS rebinding protection so Railway proxy headers are accepted
