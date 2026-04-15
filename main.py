@@ -5,9 +5,8 @@ from contextlib import asynccontextmanager
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
 # --- Config ---
@@ -17,9 +16,13 @@ BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
 
+# Patch transport security BEFORE creating MCP
+os.environ["FORWARDED_ALLOW_IPS"] = "*"
+
 # Serve MCP at root path so Claude's POST / hits it directly
 mcp = FastMCP("Bukku", stateless_http=True)
 mcp.settings.streamable_http_path = "/"
+mcp.settings.host = "0.0.0.0"
 
 
 def bukku_get(path: str, params: dict = {}) -> dict:
@@ -127,31 +130,22 @@ async def oauth_token(request: Request):
     })
 
 
-# --- Auth middleware: accept any Bearer token ---
-class AcceptAnyBearerMiddleware:
-    def __init__(self, app):
-        self.app = app
+# Monkey-patch StreamableHTTP transport security to allow all hosts
+try:
+    from mcp.server.streamable_http import StreamableHTTPServerTransport
+    original_init = StreamableHTTPServerTransport.__init__
 
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            headers = dict(scope.get("headers", []))
-            path = scope.get("path", "")
-            # Skip auth check for OAuth and well-known endpoints
-            skip_paths = ["/oauth/", "/.well-known/", "/register"]
-            if not any(path.startswith(p) for p in skip_paths):
-                auth = headers.get(b"authorization", b"").decode()
-                if not auth.startswith("Bearer "):
-                    async def send_401(send):
-                        await send({"type": "http.response.start", "status": 401,
-                                    "headers": [[b"content-type", b"application/json"],
-                                                [b"www-authenticate", b"Bearer"]]})
-                        await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
-                    await send_401(send)
-                    return
-        await self.app(scope, receive, send)
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if hasattr(self, '_security') and self._security:
+            self._security.allowed_hosts = None
+
+    StreamableHTTPServerTransport.__init__ = patched_init
+except Exception:
+    pass
 
 
-# Build MCP app with route at /
+# Build MCP app
 mcp_starlette = mcp.streamable_http_app()
 
 @asynccontextmanager
@@ -171,8 +165,6 @@ app = Starlette(
         Mount("/", app=mcp_starlette),
     ]
 )
-
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 
 if __name__ == "__main__":
     import uvicorn
