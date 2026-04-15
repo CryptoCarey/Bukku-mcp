@@ -4,6 +4,7 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
@@ -16,13 +17,11 @@ BASE_URL = f"https://api.bukku.my/{BUKKU_SUBDOMAIN}"
 HEADERS = {"Authorization": f"Bearer {BUKKU_TOKEN}"}
 SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-ce3e2.up.railway.app")
 
-# Patch transport security BEFORE creating MCP
-os.environ["FORWARDED_ALLOW_IPS"] = "*"
+# Disable DNS rebinding protection so Railway proxy headers are accepted
+security_settings = TransportSecuritySettings(enable_dns_rebinding_protection=False)
 
-# Serve MCP at root path so Claude's POST / hits it directly
-mcp = FastMCP("Bukku", stateless_http=True)
+mcp = FastMCP("Bukku", stateless_http=True, transport_security=security_settings)
 mcp.settings.streamable_http_path = "/"
-mcp.settings.host = "0.0.0.0"
 
 
 def bukku_get(path: str, params: dict = {}) -> dict:
@@ -128,21 +127,6 @@ async def oauth_token(request: Request):
         "expires_in": 86400,
         "scope": ""
     })
-
-
-# Monkey-patch StreamableHTTP transport security to allow all hosts
-try:
-    from mcp.server.streamable_http import StreamableHTTPServerTransport
-    original_init = StreamableHTTPServerTransport.__init__
-
-    def patched_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        if hasattr(self, '_security') and self._security:
-            self._security.allowed_hosts = None
-
-    StreamableHTTPServerTransport.__init__ = patched_init
-except Exception:
-    pass
 
 
 # Build MCP app
