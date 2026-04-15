@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 
 # --- Config ---
@@ -119,7 +119,36 @@ async def oauth_authorize(request: Request):
     return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}")
 
 async def oauth_token(request: Request):
-    return JSONResponse({"access_token": "bukku-mcp-token", "token_type": "bearer", "expires_in": 86400})
+    return JSONResponse({
+        "access_token": "bukku-mcp-token",
+        "token_type": "bearer",
+        "expires_in": 86400,
+        "scope": ""
+    })
+
+
+# --- Auth middleware: accept any Bearer token ---
+class AcceptAnyBearerMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            path = scope.get("path", "")
+            # Skip auth check for OAuth and well-known endpoints
+            skip_paths = ["/oauth/", "/.well-known/", "/register"]
+            if not any(path.startswith(p) for p in skip_paths):
+                auth = headers.get(b"authorization", b"").decode()
+                if not auth.startswith("Bearer "):
+                    async def send_401(send):
+                        await send({"type": "http.response.start", "status": 401,
+                                    "headers": [[b"content-type", b"application/json"],
+                                                [b"www-authenticate", b"Bearer"]]})
+                        await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+                    await send_401(send)
+                    return
+        await self.app(scope, receive, send)
 
 
 # Build MCP app with route at /
